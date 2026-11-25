@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#10231c">
+<title>Sobrevoo</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@500;600;700&display=swap">
+<style>
+:root{--bg:#10231c;--panel:#1e3a2f;--ink:#f1f5ee;--track:#ffc933}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:600 15px/1.3 Barlow,system-ui,sans-serif}
+#map,#hud{position:absolute;inset:0;width:100%;height:100%}
+#hud{pointer-events:none}
+#bar{position:absolute;left:0;right:0;bottom:0;display:flex;gap:8px;flex-wrap:wrap;padding:40px 12px calc(12px + env(safe-area-inset-bottom));background:linear-gradient(transparent,rgba(16,35,28,.94) 45%)}
+button,label.b{flex:1 1 42%;min-height:48px;border:0;border-radius:10px;background:var(--panel);color:var(--ink);font:inherit;display:flex;align-items:center;justify-content:center;cursor:pointer}
+button:focus-visible,label.b:focus-within{outline:3px solid var(--track);outline-offset:2px}
+button.p{background:var(--track);color:#2a2100}
+button.r{background:#b5432a}
+button:disabled{opacity:.4;cursor:default}
+#msg{position:absolute;left:16px;right:16px;bottom:calc(150px + env(safe-area-inset-bottom));text-align:center;font-size:16px;text-shadow:0 1px 6px #000;pointer-events:none}
+input{display:none}
+.maplibregl-ctrl-bottom-right{bottom:150px}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<canvas id="hud"></canvas>
+<div id="msg"></div>
+<div id="bar">
+  <button id="bRec">Gravar GPS</button>
+  <label class="b">Abrir GPX, KML ou KMZ<input id="file" type="file" accept=".gpx,.kml,.kmz"></label>
+  <button id="bPlay" class="p" disabled>Replay</button>
+  <button id="bExp" disabled>Exportar vídeo</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const EMPTY = {type:'FeatureCollection',features:[]};
+const DUR = 28000, INTRO = 2600;
+let pts = [], D = [], T = [], G = [];
+let name = 'Percurso', dateTxt = '';
+let playing = false, prog = 0, bear = 0, last = 0, introEnd = 0, showEnd = false;
+let watchId = null, wake = null, exp = null, ex = null;
+
+/* ---------- mapa ---------- */
+const map = new maplibregl.Map({
+  container:'map',
+  preserveDrawingBuffer:true,
+  pixelRatio:Math.min(devicePixelRatio||1,2),
+  center:[-52,-15], zoom:4, maxPitch:75,
+  style:{version:8,
+    sources:{
+      sat:{type:'raster',tileSize:256,maxzoom:18,attribution:'Imagens: Esri',
+        tiles:['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}']},
+      dem:{type:'raster-dem',encoding:'terrarium',tileSize:256,maxzoom:14,
+        tiles:['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png']},
+      trk:{type:'geojson',data:EMPTY},
+      dot:{type:'geojson',data:EMPTY}},
+    layers:[
+      {id:'sat',type:'raster',source:'sat'},
+      {id:'casing',type:'line',source:'trk',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#fff','line-width':9,'line-opacity':.85}},
+      {id:'line',type:'line',source:'trk',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#ffc933','line-width':5}},
+      {id:'dot',type:'circle',source:'dot',paint:{'circle-radius':8,'circle-color':'#ffc933','circle-stroke-color':'#fff','circle-stroke-width':3}}],
+    terrain:{source:'dem',exaggeration:1.3}}
+});
+map.addControl(new maplibregl.AttributionControl({compact:true}),'bottom-right');
+map.on('error',e=>{console.error(e.error||e);const t=String(e.error&&e.error.message||'');
+  if(!map.isStyleLoaded()&&!map.getSource('trk')) msg('Erro ao carregar o mapa: '+t.slice(0,80),8000);});
+
+/* ---------- geometria ---------- */
+const R = Math.PI/180;
+const hav = (a,b) => { const x=(b[0]-a[0])*R, y=(b[1]-a[1])*R,
+  s=Math.sin(y/2)**2+Math.cos(a[1]*R)*Math.cos(b[1]*R)*Math.sin(x/2)**2; return 12742000*Math.asin(Math.sqrt(s)); };
+const brg = (a,b) => { const dx=(b[0]-a[0])*R, y=Math.sin(dx)*Math.cos(b[1]*R),
+  x=Math.cos(a[1]*R)*Math.sin(b[1]*R)-Math.sin(a[1]*R)*Math.cos(b[1]*R)*Math.cos(dx); return Math.atan2(y,x)/R; };
+const hms = s => [s/3600|0,(s/60|0)%60,s%60|0].map(n=>String(n).padStart(2,'0')).join(':');
+const km = m => (m/1000).toFixed(2).replace('.',',');
+
+function calc(){
+  D=[0]; G=[0]; const t0=pts[0]?.[3];
+  T=[t0!=null?0:null];
+  for(let i=1;i<pts.length;i++){
+    D[i]=D[i-1]+hav(pts[i-1],pts[i]);
+    T[i]=(t0!=null&&pts[i][3]!=null)?pts[i][3]-t0:null;
+    const de=(pts[i][2]||0)-(pts[i-1][2]||0);
+    G[i]=G[i-1]+(de>.5?de:0);
+  }
+}
+function at(f){
+  if(pts.length<2) return {i:0,p:pts[0]||[0,0],d:0,t:null,g:0};
+  const d=f*D[D.length-1]; let lo=0,hi=D.length-1;
+  while(hi-lo>1){const m=(lo+hi)>>1; D[m]<=d?lo=m:hi=m;}
+  const u=(d-D[lo])/((D[hi]-D[lo])||1), L=(a,b)=>a+(b-a)*u;
+  return {i:lo,d,p:[L(pts[lo][0],pts[hi][0]),L(pts[lo][1],pts[hi][1])],
+    t:T[lo]==null||T[hi]==null?null:L(T[lo],T[hi]),g:L(G[lo],G[hi])};
+}
+const lineOf = a => ({type:'Feature',geometry:{type:'LineString',
+  coordinates:pts.slice(0,a.i+1).map(p=>[p[0],p[1]]).concat([a.p])}});
+
+/* ---------- desenho de cada quadro ---------- */
+function frame(f){
+  const a=at(f);
+  map.getSource('trk').setData(lineOf(a));
+  map.getSource('dot').setData({type:'Feature',geometry:{type:'Point',coordinates:a.p}});
+  const tot=D[D.length-1]||1;
+  const nxt=at(Math.min(1,f+Math.max(.004,60/tot))).p;
+  if(nxt[0]!==a.p[0]||nxt[1]!==a.p[1]){
+    const dl=((brg(a.p,nxt)-bear+540)%360)-180; bear+=dl*.06;
+  }
+  map.jumpTo({center:a.p,bearing:bear,pitch:62,zoom:16.3});
+  hud(a,f);
+}
+function hud(a,f){
+  const c=$('#hud'), m=map.getCanvas();
+  if(c.width!==m.width||c.height!==m.height){c.width=m.width;c.height=m.height;}
+  const x=c.getContext('2d'), k=m.width/m.clientWidth, w=m.clientWidth, h=m.clientHeight;
+  x.setTransform(k,0,0,k,0,0); x.clearRect(0,0,w,h);
+  x.shadowColor='rgba(0,0,0,.65)'; x.shadowBlur=8; x.fillStyle='#fff'; x.textAlign='left';
+  if(!pts.length) return;
+  x.fillStyle='#ffc933'; x.fillRect(0,0,w*f,4); x.fillStyle='#fff';
+  if(playing&&performance.now()<introEnd){
+    x.font='700 40px Barlow,sans-serif'; x.fillText(name,20,h*.4,w-40);
+    x.font='600 18px Barlow,sans-serif'; x.fillText(dateTxt,20,h*.4+30);
+  } else if(showEnd){
+    x.font='700 40px Barlow,sans-serif'; x.fillText(name,20,h*.4,w-40);
+    x.font='600 22px Barlow,sans-serif';
+    x.fillText(`${km(D[D.length-1])} km  ·  ${T[T.length-1]!=null?hms(T[T.length-1]):'—'}  ·  +${Math.round(G[G.length-1])} m`,20,h*.4+34,w-40);
+  } else {
+    x.font='700 22px Barlow,sans-serif'; x.fillText(name,16,40,w-32);
+    x.font='600 17px Barlow,sans-serif';
+    x.fillText(`${km(a.d)} km   ${a.t!=null?hms(a.t):'—'}   +${Math.round(a.g)} m`,16,66);
+  }
+  x.textAlign='right'; x.font='500 12px Barlow,sans-serif'; x.fillText('Sobrevoo · Imagens: Esri',w-12,22);
+}
+
+/* ---------- loop ---------- */
+function tick(ts){
+  if(playing){
+    const now=performance.now();
+    if(now>=introEnd){
+      prog+=(last?ts-last:0)/DUR; last=ts;
+      if(prog>=1){prog=1;playing=false;showEnd=true;ui(); if(exp) setTimeout(stopExp,2400);}
+    }
+    frame(prog);
+  } else last=0;
+  if(exp&&ex){ex.x.drawImage(map.getCanvas(),0,0);ex.x.drawImage($('#hud'),0,0,ex.c.width,ex.c.height);}
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+function play(){
+  if(pts.length<2) return;
+  if(prog>=1||showEnd) prog=0;
+  showEnd=false; playing=true; last=0; bear=brg(pts[0],pts[Math.min(pts.length-1,5)]);
+  introEnd=performance.now()+INTRO; ui();
+}
+function pause(){playing=false; ui();}
+
+/* ---------- carregar percurso ---------- */
+function setTrack(p,n,t){
+  pts=p; calc(); name=n; prog=0; showEnd=false; playing=false;
+  dateTxt=(t||pts[0]?.[3])?new Date((t||pts[0][3])*1000).toLocaleDateString('pt-BR',{day:'numeric',month:'long',year:'numeric'}):'';
+  const a=at(1);
+  map.getSource('trk').setData(lineOf(a)); map.getSource('dot').setData(EMPTY);
+  const b=new maplibregl.LngLatBounds(); pts.forEach(q=>b.extend([q[0],q[1]]));
+  map.fitBounds(b,{padding:{top:90,bottom:200,left:40,right:40},pitch:45,duration:1200,maxZoom:17});
+  hud(a,0); msg(''); ui();
+}
+function parse(text,fname){
+  const doc=new DOMParser().parseFromString(text,'text/xml'); let p=[];
+  const tps=[...doc.querySelectorAll('trkpt')], rps=[...doc.querySelectorAll('rtept')];
+  if(tps.length||rps.length){
+    p=(tps.length?tps:rps).map(e=>{
+      const t=e.querySelector('time')?.textContent, z=e.querySelector('ele')?.textContent;
+      return [+e.getAttribute('lon'),+e.getAttribute('lat'),z!=null?+z:0,t?Date.parse(t)/1000:null];
+    });
+  } else {
+    let cs=[...doc.querySelectorAll('LineString coordinates')]; if(!cs.length) cs=[...doc.querySelectorAll('coordinates')];
+    let best=[];
+    cs.forEach(e=>{const l=e.textContent.trim().split(/\s+/).map(s=>s.split(',').map(Number)).filter(q=>q.length>=2&&!isNaN(q[0])&&!isNaN(q[1]));
+      if(l.length>best.length) best=l;});
+    p=best.map(q=>[q[0],q[1],q[2]||0,null]);
+  }
+  p=p.filter(q=>!isNaN(q[0])&&!isNaN(q[1]));
+  if(p.length<2) return msg('Não encontrei um percurso nesse arquivo.',4000);
+  const n=doc.querySelector('trk > name, Document > name, Placemark > name')?.textContent?.trim()||fname.replace(/\.[^.]+$/,'');
+  setTrack(p,n);
+}
+$('#file').onchange=async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  try{
+    if(/\.kmz$/i.test(f.name)){
+      const z=await JSZip.loadAsync(await f.arrayBuffer());
+      const k=Object.keys(z.files).find(n=>/\.kml$/i.test(n));
+      if(!k) throw 0; parse(await z.files[k].async('string'),f.name);
+    } else parse(await f.text(),f.name);
+  }catch(err){console.error(err);msg('Não consegui ler esse arquivo: '+(err&&err.message||'formato inválido'),6000);}
+  e.target.value='';
+};
+
+/* ---------- gravação ao vivo ---------- */
+async function startRec(){
+  if(!navigator.geolocation) return msg('Este aparelho não tem GPS disponível.',4000);
+  pause(); pts=[]; D=[0];T=[null];G=[0]; name='Gravação'; showEnd=false;
+  dateTxt=new Date().toLocaleDateString('pt-BR',{day:'numeric',month:'long',year:'numeric'});
+  try{wake=await navigator.wakeLock?.request('screen');}catch(e){}
+  msg('Procurando sinal de GPS…');
+  watchId=navigator.geolocation.watchPosition(pos=>{
+    const c=pos.coords; if(c.accuracy>35) return;
+    const p=[c.longitude,c.latitude,c.altitude||0,pos.timestamp/1000], l=pts[pts.length-1];
+    if(l&&hav(l,p)<3) return;
+    pts.push(p); calc(); msg('');
+    map.getSource('trk').setData(lineOf(at(1)));
+    map.getSource('dot').setData({type:'Feature',geometry:{type:'Point',coordinates:p}});
+    map.easeTo({center:p,zoom:17,pitch:0,bearing:0,duration:700});
+    hud(at(1),0);
+    try{localStorage.setItem('sv_rec',JSON.stringify(pts));}catch(e){}
+  },err=>msg('GPS indisponível: permita a localização no navegador.',5000),
+  {enableHighAccuracy:true,maximumAge:0,timeout:20000});
+  ui();
+}
+function stopRec(){
+  navigator.geolocation.clearWatch(watchId); watchId=null; wake?.release?.(); wake=null;
+  if(pts.length<2){pts=[];msg('Gravação muito curta para gerar o replay.',4000);ui();return;}
+  const p=pts; setTrack(p,'Gravação de '+new Date(p[0][3]*1000).toLocaleDateString('pt-BR'));
+}
+
+/* ---------- exportar vídeo ---------- */
+function startExp(){
+  if(pts.length<2||typeof MediaRecorder==='undefined') return msg('Este navegador não exporta vídeo.',4000);
+  const m=map.getCanvas(), c=document.createElement('canvas'); c.width=m.width; c.height=m.height;
+  ex={c,x:c.getContext('2d')};
+  const mt=['video/mp4;codecs=avc1','video/webm;codecs=vp9','video/webm'].find(t=>MediaRecorder.isTypeSupported(t));
+  const mr=new MediaRecorder(c.captureStream(30),{mimeType:mt,videoBitsPerSecond:8e6}), ch=[];
+  mr.ondataavailable=e=>e.data.size&&ch.push(e.data);
+  mr.onstop=()=>{
+    const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob(ch,{type:mt}));
+    a.download='sobrevoo.'+(mt.includes('mp4')?'mp4':'webm'); a.click();
+    exp=null; ex=null; ui(); msg('Vídeo salvo.',3000);
+  };
+  exp=mr; mr.start(500); prog=0; play(); msg('Gravando o vídeo… aguarde o fim do replay.');
+}
+function stopExp(){ if(exp&&exp.state!=='inactive') exp.stop(); }
+
+/* ---------- interface ---------- */
+function msg(t,ms){const e=$('#msg'); e.textContent=t; if(ms) setTimeout(()=>{if(e.textContent===t)e.textContent='';},ms);}
+function ui(){
+  const rec=watchId!=null, has=pts.length>1&&!rec;
+  $('#bRec').textContent=rec?'Parar gravação':'Gravar GPS';
+  $('#bRec').className=rec?'r':'';
+  $('#bRec').disabled=!!exp;
+  $('#bPlay').textContent=playing?'Pausar':'Replay';
+  $('#bPlay').disabled=!has||!!exp;
+  $('#bExp').disabled=!has||!!exp;
+  $('#file').disabled=rec||!!exp;
+}
+$('#bRec').onclick=()=>watchId!=null?stopRec():startRec();
+$('#bPlay').onclick=()=>playing?pause():play();
+$('#bExp').onclick=startExp;
+
+map.on('load',()=>{
+  try{
+    const s=JSON.parse(localStorage.getItem('sv_rec')||'[]');
+    if(s.length>1) setTrack(s,'Última gravação'); else msg('Grave um percurso ou abra um arquivo GPX, KML ou KMZ.');
+  }catch(e){msg('Grave um percurso ou abra um arquivo GPX, KML ou KMZ.');}
+  ui();
+});
+</script>
+</body>
+</html>
