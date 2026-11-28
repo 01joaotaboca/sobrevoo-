@@ -1,0 +1,856 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#10231c">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Sobrevoo">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Sobrevoo</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@500;600;700&display=swap">
+<style>
+:root{--bg:#10231c;--panel:#1e3a2f;--ink:#f1f5ee;--track:#ffc933}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:600 15px/1.3 Barlow,system-ui,sans-serif}
+#map,#hud{position:absolute;inset:0;width:100%;height:100%}
+#hud{pointer-events:none}
+#bar{position:absolute;left:0;right:0;bottom:0;display:flex;gap:8px;flex-wrap:wrap;padding:40px 12px calc(12px + env(safe-area-inset-bottom));background:linear-gradient(transparent,rgba(16,35,28,.94) 45%)}
+button,label.b{flex:1 1 42%;min-height:44px;border:0;border-radius:10px;background:var(--panel);color:var(--ink);font:inherit;display:flex;align-items:center;justify-content:center;cursor:pointer}
+button:focus-visible,label.b:focus-within{outline:3px solid var(--track);outline-offset:2px}
+button.p{background:var(--track);color:#2a2100}
+button.r{background:#b5432a}
+button:disabled{opacity:.4;cursor:default}
+#msg{position:absolute;left:16px;right:16px;bottom:calc(314px + env(safe-area-inset-bottom));text-align:center;font-size:16px;text-shadow:0 1px 6px #000;pointer-events:none}
+input{display:none}
+.maplibregl-ctrl-bottom-right{bottom:314px}
+#bar2{position:absolute;left:0;right:0;bottom:0;display:none;gap:8px;flex-wrap:wrap;padding:40px 12px calc(12px + env(safe-area-inset-bottom));background:linear-gradient(transparent,rgba(16,35,28,.94) 45%)}
+body.draw #bar{display:none}
+body.draw #bar2{display:flex}
+#bDone{flex:1 1 100%}
+body.exp #bar,body.exp #bar2,body.exp #panel{display:none!important}
+#panel{position:absolute;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));max-height:70%;overflow:auto;display:none;flex-direction:column;gap:8px;padding:14px;border-radius:14px;background:rgba(16,35,28,.96)}
+#panel h3{margin:0 0 4px;font-size:18px}
+#panel p{margin:0}
+#panel input{display:block!important;width:100%;box-sizing:border-box;min-height:44px;border:0;border-radius:10px;padding:0 12px;background:#10231c;color:var(--ink);font:inherit;outline:2px solid var(--track)}
+#panel .it{display:flex;gap:6px;flex-wrap:wrap}
+#panel .it button{flex:1 1 0;min-width:70px;min-height:44px}
+#panel .it button:first-child{flex:1 1 100%;justify-content:flex-start;padding:0 12px;text-align:left}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<canvas id="hud"></canvas>
+<div id="msg"></div>
+<div id="bar">
+  <button id="bRec">Gravar GPS</button>
+  <label class="b">Abrir GPX, KML ou KMZ<input id="file" type="file" accept=".gpx,.kml,.kmz"></label>
+  <button id="bPlay" class="p" disabled>Replay</button>
+  <button id="bExp" disabled>Exportar vídeo</button>
+  <button id="bDraw">Desenhar área</button>
+  <button id="bRoad">Desenhar estrada</button>
+  <button id="bAreas">Áreas salvas</button>
+  <button id="bMode" disabled>Voo: Órbita</button>
+  <button id="bAlt" style="flex:1 1 100%">Altura do voo: Média</button>
+  <button id="bCity" style="flex:1 1 100%">Buscar cidade</button>
+  <button id="bRen" disabled>Renomear projeto</button>
+  <button id="bLoc">Minha localização</button>
+</div>
+<div id="bar2">
+  <button id="bUndo">Desfazer ponto</button>
+  <button id="bCancel">Cancelar</button>
+  <button id="bSnap" style="display:none">Seguir estrada: Sim</button>
+  <button id="bTrip" style="display:none">Percorrer trajeto</button>
+  <button id="bLoc2" style="flex:1 1 100%">Minha localização</button>
+  <button id="bDone" class="p">Concluir e salvar</button>
+</div>
+<div id="panel"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const EMPTY = {type:'FeatureCollection',features:[]};
+const DUR = 28000, INTRO = 3800, OUTRO = 5000, TAKEOFF = 5000; // TAKEOFF: decolagem antes da órbita
+const CRED1 = '© 2026 · Desenvolvido por', AUTOR = 'João Divino Barbosa';
+const END_Y = 0.72; // posição do cartão final na altura do vídeo (0 = topo, 1 = base); 0.72 deixa livre a área dos botões do Instagram/WhatsApp
+let pts = [], D = [], T = [], G = [];
+let name = 'Percurso', dateTxt = '';
+let playing = false, prog = 0, bear = 0, last = 0, introEnd = 0, showEnd = false;
+let watchId = null, wake = null, exp = null, ex = null;
+let cam = {z:15,p:55}; // câmera de acompanhamento: calculada pelo tamanho do percurso
+let ov = {c:[0,0],z:12}; // câmera de visão geral (de cima, mostrando a área inteira)
+let outroStart = 0;
+let voo = 'orbita', dur = DUR, fb = 0, forcedOpen = false; // voo: 'orbita' (gira em volta) ou 'seguir' (acompanha o trajeto/estrada)
+const FOLLOW = {z:16.2, p:55}; // voo do alto: mais longe do chão, com menos horizonte
+const HT = [{n:'Baixa',dz:0},{n:'Média',dz:-1},{n:'Alta',dz:-2},{n:'Muito alta',dz:-3}]; // cada nível sobe a câmera ao dobro da altura
+let hi = 1; try{ const v=+localStorage.getItem('voo_altura'); if(v>=0&&v<HT.length) hi=v; }catch(e){}
+const hDz = () => HT[hi].dz, hMul = () => Math.pow(2,-HT[hi].dz); // deslocamento de zoom e multiplicador do altímetro
+let alt = 0, recStart = 0, recEnd = 0; // altímetro e relógio da gravação (REC)
+
+/* ---------- imagem de satélite sem buracos ---------- */
+/* Onde a Esri não tem imagem nítida ela devolve um azulejo cinza "Map data not yet available".
+   Aqui detectamos esse azulejo e usamos o do nível de zoom acima, ampliado: o mapa nunca fica cinza. */
+const esriBad=new Set();
+const esriUrl=(z,x,y)=>`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
+const esriRuim=(z,x,y)=>{for(let a=0;a<=z&&a<8;a++) if(esriBad.has((z-a)+'/'+(x>>a)+'/'+(y>>a))) return true; return false;};
+function semImagem(bmp){ // azulejo cinza liso (com texto claro) = sem imagem
+  const c=document.createElement('canvas'); c.width=c.height=24;
+  const g=c.getContext('2d',{willReadFrequently:true}); g.drawImage(bmp,0,0,24,24);
+  const d=g.getImageData(0,0,24,24).data; let n=0,s=0,s2=0,dif=0;
+  for(let i=0;i<d.length;i+=4){const l=(d[i]+d[i+1]+d[i+2])/3; s+=l; s2+=l*l; dif=Math.max(dif,Math.abs(d[i]-d[i+1]),Math.abs(d[i+1]-d[i+2])); n++;}
+  const m=s/n, sd=Math.sqrt(Math.max(0,s2/n-m*m));
+  return dif<10&&sd<16&&m>165&&m<235;
+}
+maplibregl.addProtocol('esri',async(p,ac)=>{
+  const [z,y,x]=p.url.replace('esri://','').split('/').map(Number);
+  for(let l=0;l<=3&&z-l>=0;l++){
+    const zz=z-l, xx=x>>l, yy=y>>l; if(esriRuim(zz,xx,yy)) continue;
+    const r=await fetch(esriUrl(zz,xx,yy),{signal:ac.signal}); if(!r.ok) throw new Error('tile '+r.status);
+    const blob=await r.blob(), bmp=await createImageBitmap(blob);
+    if(semImagem(bmp)){esriBad.add(zz+'/'+xx+'/'+yy); continue;}
+    if(l===0) return {data:await blob.arrayBuffer()};
+    const c=document.createElement('canvas'); c.width=c.height=256; const g=c.getContext('2d'); g.imageSmoothingQuality='high';
+    const sz=256>>l; g.drawImage(bmp,(x&((1<<l)-1))*sz,(y&((1<<l)-1))*sz,sz,sz,0,0,256,256);
+    const out=await new Promise(res=>c.toBlob(res,'image/jpeg',.9)); return {data:await out.arrayBuffer()};
+  }
+  const c=document.createElement('canvas'); c.width=c.height=256; // nenhum nível tem imagem: azulejo vazio (fundo escuro)
+  const out=await new Promise(res=>c.toBlob(res,'image/png')); return {data:await out.arrayBuffer()};
+});
+
+/* ---------- mapa ---------- */
+const map = new maplibregl.Map({
+  container:'map',
+  preserveDrawingBuffer:true,
+  pixelRatio:Math.min(devicePixelRatio||1,2),
+  center:[-52,-15], zoom:4, maxPitch:75,
+  style:{version:8,
+    sources:{
+      sat:{type:'raster',tileSize:256,maxzoom:17,attribution:'Imagens: Esri',
+        tiles:['esri://{z}/{y}/{x}']},
+      dem:{type:'raster-dem',encoding:'terrarium',tileSize:256,maxzoom:14,
+        tiles:['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png']},
+      area:{type:'geojson',data:EMPTY},
+      ghost:{type:'geojson',data:EMPTY},
+      trk:{type:'geojson',data:EMPTY},
+      dot:{type:'geojson',data:EMPTY}},
+    layers:[
+      {id:'sat',type:'raster',source:'sat'},
+      {id:'area',type:'fill',source:'area',paint:{'fill-color':'#ffc933','fill-opacity':.22}},
+      {id:'ghost',type:'line',source:'ghost',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#fff','line-width':3,'line-opacity':.8}},
+      {id:'casing',type:'line',source:'trk',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#fff','line-width':9,'line-opacity':.85}},
+      {id:'line',type:'line',source:'trk',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#ffc933','line-width':5}},
+      {id:'dot',type:'circle',source:'dot',filter:['==',['geometry-type'],'MultiPoint'],paint:{'circle-radius':8,'circle-color':'#ffc933','circle-stroke-color':'#fff','circle-stroke-width':3}}],
+    terrain:{source:'dem',exaggeration:1.3}}
+});
+map.addControl(new maplibregl.AttributionControl({compact:true}),'bottom-right');
+map.on('error',e=>{console.error(e.error||e);const t=String(e.error&&e.error.message||'');
+  if(!map.isStyleLoaded()&&!map.getSource('trk')) msg('Erro ao carregar o mapa: '+t.slice(0,80),8000);});
+
+/* ---------- geometria ---------- */
+const R = Math.PI/180;
+const hav = (a,b) => { const x=(b[0]-a[0])*R, y=(b[1]-a[1])*R,
+  s=Math.sin(y/2)**2+Math.cos(a[1]*R)*Math.cos(b[1]*R)*Math.sin(x/2)**2; return 12742000*Math.asin(Math.sqrt(s)); };
+const brg = (a,b) => { const dx=(b[0]-a[0])*R, y=Math.sin(dx)*Math.cos(b[1]*R),
+  x=Math.cos(a[1]*R)*Math.sin(b[1]*R)-Math.sin(a[1]*R)*Math.cos(b[1]*R)*Math.cos(dx); return Math.atan2(y,x)/R; };
+const hms = s => [s/3600|0,(s/60|0)%60,s%60|0].map(n=>String(n).padStart(2,'0')).join(':');
+const km = m => (m/1000).toFixed(2).replace('.',',');
+
+function calc(){
+  D=[0]; G=[0]; const t0=pts[0]?.[3];
+  T=[t0!=null?0:null];
+  for(let i=1;i<pts.length;i++){
+    D[i]=D[i-1]+hav(pts[i-1],pts[i]);
+    T[i]=(t0!=null&&pts[i][3]!=null)?pts[i][3]-t0:null;
+    const de=(pts[i][2]||0)-(pts[i-1][2]||0);
+    G[i]=G[i-1]+(de>.5?de:0);
+  }
+}
+function at(f){
+  if(pts.length<2) return {i:0,p:pts[0]||[0,0],d:0,t:null,g:0};
+  const d=f*D[D.length-1]; let lo=0,hi=D.length-1;
+  while(hi-lo>1){const m=(lo+hi)>>1; D[m]<=d?lo=m:hi=m;}
+  const u=(d-D[lo])/((D[hi]-D[lo])||1), L=(a,b)=>a+(b-a)*u;
+  return {i:lo,d,p:[L(pts[lo][0],pts[hi][0]),L(pts[lo][1],pts[hi][1])],
+    t:T[lo]==null||T[hi]==null?null:L(T[lo],T[hi]),g:L(G[lo],G[hi])};
+}
+const lineOf = a => ({type:'Feature',geometry:{type:'LineString',
+  coordinates:pts.slice(0,a.i+1).map(p=>[p[0],p[1]]).concat([a.p])}});
+
+/* ---------- desenho de cada quadro ---------- */
+function frame(f,k=1){ // k: 0 = visão geral de cima, 1 = câmera inclinada seguindo o percurso
+  const a=at(f);
+  map.getSource('trk').setData(lineOf(a));
+  map.getSource('dot').setData({type:'Feature',geometry:{type:'Point',coordinates:a.p}});
+  const s=k*k*(3-2*k);
+  if(voo==='seguir'&&pts.length>1){ // acompanha a estrada: câmera segue o trajeto de ponta a ponta
+    alt=(150-60*s)*hMul(); const t=followCam(f), bn=((t.b+540)%360)-180;
+    map.jumpTo({center:[ov.c[0]+(a.p[0]-ov.c[0])*s,ov.c[1]+(a.p[1]-ov.c[1])*s],bearing:bn*s,pitch:t.p*s,zoom:ov.z+(t.z-ov.z)*s});
+  } else { // helicóptero: gira 360° em torno do centro da área
+    alt=(150-40*s)*hMul();
+    map.jumpTo({center:ov.c,bearing:360*f,pitch:cam.p*s,zoom:ov.z+(Math.max(3,cam.z+hDz())-ov.z)*s});
+  }
+  heli.move(f); hud(a,f);
+}
+const lookAhead = () => Math.min(.5,Math.max(.002,120/((D[D.length-1])||1))); // olha ~120 m à frente
+function initFb(){ if(pts.length>1) fb=brg(at(0).p,at(lookAhead()).p); }
+function followCam(f){ // câmera atrás do helicóptero, apontando para a frente da estrada, curvando suavemente
+  const dl=lookAhead(), g=Math.min(f,1-dl), tb=brg(at(g).p,at(g+dl).p);
+  fb+=(((tb-fb+540)%360)-180)*.07; return {b:fb,p:FOLLOW.p,z:Math.max(3,FOLLOW.z+hDz())};
+}
+function setVoo(m){
+  voo=m; dur=m==='seguir'?Math.min(45000,Math.max(20000,(D[D.length-1]||0)/35*1000)):DUR; initFb();
+}
+function takeoff(u){ // decolagem: sai do chão no início do percurso, sobe inclinando a câmera até a visão geral
+  const a=at(0), e=u*u*(3-2*u), v=Math.max(0,(u-.2)/.8), e2=v*v*(3-2*v), sh=(1-e)*(1-e), st=pts[0]||ov.c, t=performance.now();
+  alt=150*e*hMul();
+  map.jumpTo({center:[st[0]+(ov.c[0]-st[0])*e, st[1]+(ov.c[1]-st[1])*e],
+    zoom:16.6+(ov.z-16.6)*e+0.03*Math.sin(t/70)*sh, // tremidinha do motor nos primeiros metros
+    pitch:68*(1-e2), bearing:-35*(1-e)+1.6*Math.sin(t/110)*sh});
+  hud(a,0);
+}
+let lastH=null, isClosed=false, fields=[], multi=false, info=null;
+const fha = v => v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+function areaHa(r){ // área em hectares (projeção local plana)
+  if(r.length<3) return 0; const o=r[0], k=R*6378137, c=Math.cos(o[1]*R);
+  const P=q=>[(q[0]-o[0])*k*c,(q[1]-o[1])*k]; let a=0;
+  for(let i=0;i<r.length;i++){const u=P(r[i]),v=P(r[(i+1)%r.length]); a+=u[0]*v[1]-v[0]*u[1];}
+  return Math.abs(a)/2/1e4;
+}
+const perim = r => r.reduce((s,q,i)=>s+hav(q,r[(i+1)%r.length]),0);
+function buildInfo(){
+  if(!pts.length) return null;
+  if(multi){const ha=fields.reduce((s,f)=>s+areaHa(f.r),0);
+    return [name, fields.length+' talhões · '+fha(ha)+' ha'];}
+  if(isClosed) return [name, fha(areaHa(pts))+' ha · perímetro '+km(perim(pts))+' km'];
+  const o=['Distância '+km(D[D.length-1])+' km'], t=T[T.length-1], g=G[G.length-1];
+  if(t>0) o.push('Tempo '+hms(t)); if(g>=1) o.push('Subida '+Math.round(g)+' m');
+  return [name, o.join(' · ')];
+}
+function rr(x,cx,cy,cw,ch,r){x.beginPath();x.moveTo(cx+r,cy);x.arcTo(cx+cw,cy,cx+cw,cy+ch,r);x.arcTo(cx+cw,cy+ch,cx,cy+ch,r);
+  x.arcTo(cx,cy+ch,cx,cy,r);x.arcTo(cx,cy,cx+cw,cy,r);x.closePath();}
+function overlay(x,a){ // desenha por cima do mapa; aparece igual na tela e no vídeo exportado
+  const P=q=>{const o=map.project([q[0],q[1]]);return [o.x,o.y];};
+  const path=(arr,close)=>{x.beginPath();arr.forEach((q,i)=>{const [X,Y]=P(q);i?x.lineTo(X,Y):x.moveTo(X,Y);});if(close)x.closePath();};
+  const bolinha=q=>{const [X,Y]=P(q);x.beginPath();x.arc(X,Y,8,0,7);x.fillStyle='#ffc933';x.fill();x.strokeStyle='#fff';x.lineWidth=3;x.stroke();};
+  const carro=(p,arr,i,hd)=>{ // carrinho vermelho visto de cima, apontando para onde o percurso vai
+    const [X,Y]=P(p); let j=Math.min(i+1,arr.length-1), h;
+    while(j<arr.length-1&&hav(p,arr[j])<4) j++;
+    if(hav(p,arr[j])>=1) h=brg(p,arr[j]);
+    else{let k=Math.max(i,0); while(k>0&&hav(arr[k],p)<4) k--; h=brg(arr[k],p);}
+    if(hd!=null&&!isNaN(hd)) h=hd;
+    x.save(); x.translate(X,Y); x.rotate((h-map.getBearing())*R);
+    x.shadowColor='rgba(0,0,0,.55)'; x.shadowBlur=7; x.fillStyle='#e53935'; x.strokeStyle='#fff'; x.lineWidth=2.5;
+    rr(x,-9,-18,18,36,6); x.fill(); x.stroke(); x.shadowBlur=0;
+    x.fillStyle='#111'; [[-12,-13],[9,-13],[-12,6],[9,6]].forEach(w=>x.fillRect(w[0],w[1],3,8));
+    x.fillStyle='#e53935'; rr(x,-9,-18,18,36,6); x.fill();
+    x.fillStyle='#b71c1c'; rr(x,-6,-3,12,9,2); x.fill();
+    x.fillStyle='#1b2a33'; rr(x,-6.5,-10,13,6,2); x.fill(); rr(x,-6.5,7,13,5,2); x.fill();
+    x.fillStyle='#ffe082'; x.fillRect(-7.5,-18,4,2.5); x.fillRect(3.5,-18,4,2.5);
+    x.restore();
+  };
+  x.save(); x.shadowBlur=0; x.lineJoin='round'; x.lineCap='round';
+  if(drawing){
+    if(!drawLine&&draft.length>2){path(draft,true);x.fillStyle='rgba(255,201,51,.25)';x.fill();}
+    if(draft.length>1){path(draft,!drawLine&&draft.length>2);x.strokeStyle='#fff';x.lineWidth=drawLine?5:3;x.stroke();}
+    taps.forEach(bolinha);
+    if(trip&&trip.p&&drawLine) bolinha(trip.p);
+  } else if(pts.length>1&&multi){
+    fields.forEach(f=>{path(f.r,true);x.fillStyle='rgba(255,201,51,.22)';x.fill();
+      x.strokeStyle='rgba(255,255,255,.9)';x.lineWidth=5;x.stroke();x.strokeStyle='#ffc933';x.lineWidth=2.5;x.stroke();});
+    x.textAlign='center'; x.font='700 13px Barlow,sans-serif'; x.shadowColor='rgba(0,0,0,.9)'; x.shadowBlur=5; x.fillStyle='#fff';
+    fields.forEach(f=>{ if(!f.n) return; const m=f.r.reduce((s,q)=>[s[0]+q[0],s[1]+q[1]],[0,0]);
+      const [X,Y]=P([m[0]/f.r.length,m[1]/f.r.length]); x.fillText(f.n,X,Y,150); });
+  } else if(pts.length>1){
+    if(isClosed){path(pts,true);x.fillStyle='rgba(255,201,51,.22)';x.fill();}
+    path(pts,false);x.strokeStyle='rgba(255,255,255,.8)';x.lineWidth=3;x.stroke();
+    const part=pts.slice(0,a.i+1).concat([a.p]);
+    path(part,false);x.strokeStyle='rgba(255,255,255,.85)';x.lineWidth=9;x.stroke();
+    path(part,false);x.strokeStyle='#ffc933';x.lineWidth=5;x.stroke();
+    bolinha(a.p); // perímetro e estrada: sempre a bolinha
+  }
+  x.restore();
+}
+function hud(a,f){
+  const c=$('#hud'), m=map.getCanvas();
+  if(c.width!==m.width||c.height!==m.height){c.width=m.width;c.height=m.height;}
+  const x=c.getContext('2d'), k=m.width/m.clientWidth, w=m.clientWidth, h=m.clientHeight;
+  x.setTransform(k,0,0,k,0,0); x.clearRect(0,0,w,h);
+  lastH=[a,f]; overlay(x,a);
+  x.shadowColor='rgba(0,0,0,.65)'; x.shadowBlur=8; x.fillStyle='#fff'; x.textAlign='left';
+  if(!pts.length||drawing) return;
+  x.fillStyle='#ffc933'; x.fillRect(0,0,w*f,4); x.fillStyle='#fff';
+  let rw=0; const nh=performance.now();
+  if(recStart&&(playing||outroStart||nh<introEnd)){ // indicador de gravação: REC, tempo e altitude
+    const t=Math.max(0,((recEnd||nh)-recStart)/1000), mm=String(t/60|0).padStart(2,'0'), ss=String(t%60|0).padStart(2,'0');
+    const txt='REC '+mm+':'+ss+' · ALT '+Math.round(alt)+' m';
+    x.save(); x.shadowBlur=0; x.textAlign='left'; x.font='700 13px Barlow,sans-serif';
+    rw=Math.ceil(x.measureText(txt).width)+38; const bx=w-12-rw;
+    rr(x,bx,14,rw,30,15); x.fillStyle='rgba(16,35,28,.8)'; x.fill();
+    x.beginPath(); x.arc(bx+17,29,5,0,7); x.fillStyle=Math.floor(t*2)%2===0?'#e5372a':'rgba(229,55,42,.3)'; x.fill();
+    x.fillStyle='#fff'; x.fillText(txt,bx+29,34); x.restore();
+  }
+  if(info&&!showEnd){ // cartão de dados: nome e números do talhão/percurso
+    x.save(); x.shadowBlur=0; x.textAlign='left';
+    x.font='700 20px Barlow,sans-serif'; const w1=x.measureText(info[0]).width;
+    x.font='600 15px Barlow,sans-serif'; const w2=x.measureText(info[1]).width;
+    const bw=Math.min(w-24-(rw?rw+8:0),Math.max(w1,w2)+28);
+    rr(x,12,14,bw,60,12); x.fillStyle='rgba(16,35,28,.8)'; x.fill();
+    x.fillStyle='#fff'; x.font='700 20px Barlow,sans-serif'; x.fillText(info[0],26,40,bw-28);
+    x.fillStyle='#ffc933'; x.font='600 15px Barlow,sans-serif'; x.fillText(info[1],26,62,bw-28);
+    x.restore();
+  }
+  if(showEnd){ // encerramento: crédito do desenvolvedor no terço inferior, entrando de baixo para cima
+    const u=outroStart?Math.min(1,(performance.now()-outroStart)/700):1, e=1-(1-u)*(1-u);
+    const cw=Math.min(w-40,340), ch=112, cx=(w-cw)/2, cy=h*END_Y-ch/2, mx=w/2;
+    x.save(); x.globalAlpha=e; x.translate(0,(1-e)*26);
+    x.shadowColor='rgba(0,0,0,.5)'; x.shadowBlur=18; rr(x,cx,cy,cw,ch,18);
+    x.fillStyle='rgba(16,35,28,.92)'; x.fill();
+    x.shadowBlur=0; x.strokeStyle='rgba(255,201,51,.6)'; x.lineWidth=1.5; x.stroke();
+    x.textAlign='center'; x.fillStyle='#ffc933'; x.font='700 12px Barlow,sans-serif';
+    if('letterSpacing' in x) x.letterSpacing='3px';
+    x.fillText('SOBREVOO',mx,cy+28);
+    if('letterSpacing' in x) x.letterSpacing='0px';
+    x.fillRect(mx-18,cy+39,36,1.5);
+    x.fillStyle='rgba(255,255,255,.78)'; x.font='600 14px Barlow,sans-serif'; x.fillText(CRED1,mx,cy+63,cw-28);
+    x.fillStyle='#fff'; x.font='700 26px Barlow,sans-serif'; x.fillText(AUTOR,mx,cy+94,cw-28);
+    x.restore();
+  }
+  x.shadowColor='rgba(0,0,0,.65)'; x.shadowBlur=8; x.fillStyle='#fff';
+  x.textAlign='right'; x.font='500 12px Barlow,sans-serif'; x.fillText('Sobrevoo · Imagens: Esri',w-12,h-16);
+}
+
+
+/* ---------- som de helicóptero (sintetizado; sai no vídeo exportado) ---------- */
+const HELI_VOL = 0.6; // volume geral (0 a 1)
+const heli=(()=>{
+  let ctx=null, dest=null, master=null, swell=null, pan=null, lfo=null, tb=null, tf=null, on=false;
+  function init(){
+    if(ctx){ ctx.state==='suspended'&&ctx.resume(); return; }
+    const AC=window.AudioContext||window.webkitAudioContext; if(!AC) return;
+    ctx=new AC(); dest=ctx.createMediaStreamDestination();
+    const mix=ctx.createGain(), comp=ctx.createDynamicsCompressor();
+    master=ctx.createGain(); master.gain.value=0; swell=ctx.createGain();
+    comp.threshold.value=-14; comp.ratio.value=4;
+    mix.connect(comp); comp.connect(swell); swell.connect(master);
+    pan=ctx.createStereoPanner?ctx.createStereoPanner():null;
+    if(pan){master.connect(pan); pan.connect(ctx.destination); pan.connect(dest);}
+    else{master.connect(ctx.destination); master.connect(dest);}
+    // ruído base
+    const nb=ctx.createBuffer(1,ctx.sampleRate*2,ctx.sampleRate), d=nb.getChannelData(0);
+    for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
+    const nz=ctx.createBufferSource(); nz.buffer=nb; nz.loop=true; nz.start();
+    const F=(type,f,q)=>{const n=ctx.createBiquadFilter(); n.type=type; n.frequency.value=f; if(q)n.Q.value=q; return n;};
+    const G=v=>{const n=ctx.createGain(); n.gain.value=v; return n;};
+    // pulso das pás: seno -> curva afiada (cada pá "bate" no ar)
+    lfo=ctx.createOscillator(); lfo.type='sine'; lfo.frequency.value=8; lfo.start();
+    const sh=ctx.createWaveShaper(), cv=new Float32Array(512);
+    for(let i=0;i<512;i++){const v=(i/511); cv[i]=Math.pow(v,4);} sh.curve=cv;
+    lfo.connect(sh);
+    // 1) batida grave das pás (whop-whop)
+    const chop=G(0.35); nz.connect(F('lowpass',520,0.9)).connect(chop); chop.connect(mix);
+    const d1=G(5.5); sh.connect(d1); d1.connect(chop.gain);
+    // 2) estalo agudo da pá cortando o ar
+    const slap=G(0.0); nz.connect(F('bandpass',1100,0.9)).connect(slap); slap.connect(mix);
+    const d2=G(0.9); sh.connect(d2); d2.connect(slap.gain);
+    // 3) pancada grave (corpo)
+    const th=ctx.createOscillator(); th.type='sine'; th.frequency.value=58; th.start();
+    const tg=G(0.02); th.connect(tg); tg.connect(mix);
+    const d3=G(0.45); sh.connect(d3); d3.connect(tg.gain);
+    // 4) rumor constante do motor
+    nz.connect(F('lowpass',170,0.7)).connect(G(3.2)).connect(mix);
+    // 5) assobio da turbina
+    tb=ctx.createOscillator(); tb.type='sawtooth'; tb.frequency.value=1250; tb.start();
+    tf=F('bandpass',1250,7); tb.connect(tf).connect(G(0.05)).connect(mix);
+    ctx.state==='suspended'&&ctx.resume();
+  }
+  return {
+    init, get on(){return on;}, ok:()=>!!ctx, stream:()=>dest&&dest.stream,
+    start(){ if(!ctx) return; const t=ctx.currentTime; on=true;
+      const up=TAKEOFF/1000; // decolagem: motor em marcha lenta, pás e turbina ganhando rotação
+      lfo.frequency.cancelScheduledValues(t); lfo.frequency.setValueAtTime(3.5,t); lfo.frequency.linearRampToValueAtTime(12.5,t+up);
+      tb.frequency.cancelScheduledValues(t); tb.frequency.setValueAtTime(500,t); tb.frequency.linearRampToValueAtTime(1250,t+up);
+      tf.frequency.cancelScheduledValues(t); tf.frequency.setValueAtTime(500,t); tf.frequency.linearRampToValueAtTime(1250,t+up);
+      master.gain.cancelScheduledValues(t); master.gain.setValueAtTime(0.0001,t);
+      master.gain.setTargetAtTime(HELI_VOL*0.45,t,0.4); master.gain.setTargetAtTime(HELI_VOL,t+up*0.5,up*0.35); },
+    stop(sec){ if(!ctx||!on) return; on=false; const t=ctx.currentTime;
+      master.gain.cancelScheduledValues(t); master.gain.setTargetAtTime(0,t,Math.max(.05,sec/4)); },
+    move(f){ if(!ctx||!on) return; // sobrevoo: o som passa de um lado ao outro conforme a órbita
+      if(pan) pan.pan.value=0.6*Math.sin(2*Math.PI*f);
+      swell.gain.value=0.88+0.12*Math.cos(2*Math.PI*f); }
+  };
+})();
+
+/* ---------- loop ---------- */
+function tick(ts){
+  const now=performance.now();
+  if(playing){
+    if(now<introEnd){ // abertura: decola do chão, chega à visão geral e desce para a órbita
+      const rem=introEnd-now;
+      if(rem>INTRO) takeoff(1-(rem-INTRO)/TAKEOFF); else frame(0,1-rem/INTRO);
+    }
+    else{
+      prog+=(last?ts-last:0)/dur; last=ts;
+      if(prog>=1){prog=1;playing=false;showEnd=true;outroStart=now;recEnd=now;heli.stop(OUTRO/1000);ui(); if(exp) setTimeout(stopExp,OUTRO+500);}
+      frame(prog,1);
+    }
+  } else {
+    last=0; if(!outroStart&&heli.on) heli.stop(.3);
+    if(outroStart){ // encerramento: sobe de volta para a visão geral
+      const u=(now-outroStart)/OUTRO; frame(1,Math.max(0,1-u)); if(u>=1) outroStart=0;
+    }
+  }
+  if(exp&&ex){ex.x.drawImage(map.getCanvas(),0,0,ex.c.width,ex.c.height);ex.x.drawImage($('#hud'),0,0,ex.c.width,ex.c.height);}
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+function play(){
+  if(pts.length<2) return;
+  if(prog>=1||showEnd) prog=0;
+  showEnd=false; outroStart=0; playing=true; last=0; bear=brg(pts[0],pts[Math.min(pts.length-1,5)]);
+  initFb(); recStart=performance.now(); recEnd=0; introEnd=recStart+TAKEOFF+INTRO; heli.init(); heli.start(); ui();
+}
+function pause(){playing=false; heli.stop(.4); ui();}
+
+/* ---------- carregar percurso ---------- */
+function setTrack(p,n,t,f,fo){
+  pts=p; fields=f||[]; multi=!!f; forcedOpen=!!fo; calc(); name=n; prog=0; showEnd=false; playing=false;
+  dateTxt=(t||pts[0]?.[3])?new Date((t||pts[0][3])*1000).toLocaleDateString('pt-BR',{day:'numeric',month:'long',year:'numeric'}):'';
+  const a=at(1);
+  map.getSource('trk').setData(lineOf(a)); map.getSource('dot').setData(EMPTY);
+  const diag=fit();
+  const ring=pts.map(q=>[q[0],q[1]]), closed=!multi&&!forcedOpen&&hav(pts[0],pts[pts.length-1])<Math.max(50,diag*.05);
+  isClosed=closed; info=buildInfo(); setVoo(closed||multi?'orbita':'seguir');
+  map.getSource('ghost').setData({type:'Feature',geometry:{type:'LineString',coordinates:ring}});
+  map.getSource('area').setData(closed?{type:'Feature',geometry:{type:'Polygon',coordinates:[ring.concat([ring[0]])]}}:EMPTY);
+  map.easeTo({center:ov.c,zoom:ov.z,pitch:0,bearing:0,duration:1200});
+  hud(a,0); msg(''); ui();
+}
+function fit(){ // calcula as câmeras (visão geral e órbita) para o tamanho atual do mapa
+  const b=new maplibregl.LngLatBounds(); pts.forEach(q=>b.extend([q[0],q[1]]));
+  const diag=hav([b.getWest(),b.getSouth()],[b.getEast(),b.getNorth()]);
+  const W=Math.max(500,diag*1.8); // terreno visível na tela durante a órbita (a diagonal cabe em qualquer ângulo)
+  const pad=exp||document.body.classList.contains('exp')?{top:150,bottom:150,left:50,right:50}:{top:110,bottom:340,left:50,right:50};
+  const cf=map.cameraForBounds(b,{padding:pad,maxZoom:16});
+  const cw=map.getCanvas().clientWidth||innerWidth;
+  ov={c:[b.getCenter().lng,b.getCenter().lat],z:cf?cf.zoom:12};
+  cam.z=Math.min(16.8,Math.log2(156543*Math.cos(b.getCenter().lat*R)*cw/W)); cam.p=50;
+  return diag;
+}
+function parse(text,fname){
+  const doc=new DOMParser().parseFromString(text,'text/xml'); let p=[];
+  const tps=[...doc.querySelectorAll('trkpt')], rps=[...doc.querySelectorAll('rtept')];
+  if(tps.length||rps.length){
+    p=(tps.length?tps:rps).map(e=>{
+      const t=e.querySelector('time')?.textContent, z=e.querySelector('ele')?.textContent;
+      return [+e.getAttribute('lon'),+e.getAttribute('lat'),z!=null?+z:0,t?Date.parse(t)/1000:null];
+    });
+  } else {
+    const rings=[];
+    doc.querySelectorAll('Placemark').forEach(pm=>{
+      const nm=pm.querySelector('name')?.textContent?.trim()||'';
+      pm.querySelectorAll('Polygon').forEach(pg=>{
+        const ce=pg.querySelector('outerBoundaryIs coordinates')||pg.querySelector('coordinates'); if(!ce) return;
+        const l=ce.textContent.trim().split(/\s+/).map(s=>s.split(',').map(Number))
+          .filter(q=>q.length>=2&&!isNaN(q[0])&&!isNaN(q[1])).map(q=>[q[0],q[1]]);
+        if(l.length>=3) rings.push({n:nm,r:l});
+      });
+    });
+    if(rings.length>=2){ // vários talhões: mostra todos de uma vez
+      const all=rings.flatMap(f=>f.r.map(q=>[q[0],q[1],0,null]));
+      const n=doc.querySelector('Document > name')?.textContent?.trim()||fname.replace(/\.[^.]+$/,'');
+      return setTrack(all,n,null,rings);
+    }
+    let cs=[...doc.querySelectorAll('LineString coordinates')]; if(!cs.length) cs=[...doc.querySelectorAll('coordinates')];
+    let best=[];
+    cs.forEach(e=>{const l=e.textContent.trim().split(/\s+/).map(s=>s.split(',').map(Number)).filter(q=>q.length>=2&&!isNaN(q[0])&&!isNaN(q[1]));
+      if(l.length>best.length) best=l;});
+    p=best.map(q=>[q[0],q[1],q[2]||0,null]);
+  }
+  p=p.filter(q=>!isNaN(q[0])&&!isNaN(q[1]));
+  if(p.length<2) return msg('Não encontrei um percurso nesse arquivo.',4000);
+  const n=doc.querySelector('trk > name, Document > name, Placemark > name')?.textContent?.trim()||fname.replace(/\.[^.]+$/,'');
+  setTrack(p,n);
+}
+$('#file').onchange=async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  try{
+    if(/\.kmz$/i.test(f.name)){
+      const z=await JSZip.loadAsync(await f.arrayBuffer());
+      const k=Object.keys(z.files).find(n=>/\.kml$/i.test(n));
+      if(!k) throw 0; parse(await z.files[k].async('string'),f.name);
+    } else parse(await f.text(),f.name);
+  }catch(err){console.error(err);msg('Não consegui ler esse arquivo: '+(err&&err.message||'formato inválido'),6000);}
+  e.target.value='';
+};
+
+/* ---------- gravação ao vivo ---------- */
+async function startRec(){
+  if(!navigator.geolocation) return msg('Este aparelho não tem GPS disponível.',4000);
+  pause(); pts=[]; D=[0];T=[null];G=[0]; name='Gravação'; showEnd=false; outroStart=0; isClosed=false; info=null; fields=[]; multi=false;
+  map.getSource('ghost').setData(EMPTY); map.getSource('area').setData(EMPTY);
+  dateTxt=new Date().toLocaleDateString('pt-BR',{day:'numeric',month:'long',year:'numeric'});
+  try{wake=await navigator.wakeLock?.request('screen');}catch(e){}
+  msg('Procurando sinal de GPS…');
+  watchId=navigator.geolocation.watchPosition(pos=>{
+    const c=pos.coords; if(c.accuracy>35) return;
+    const p=[c.longitude,c.latitude,c.altitude||0,pos.timestamp/1000], l=pts[pts.length-1];
+    if(l&&hav(l,p)<3) return;
+    pts.push(p); calc(); msg('');
+    map.getSource('trk').setData(lineOf(at(1)));
+    map.getSource('dot').setData({type:'Feature',geometry:{type:'Point',coordinates:p}});
+    map.easeTo({center:p,zoom:17,pitch:0,bearing:0,duration:700});
+    hud(at(1),0);
+    try{localStorage.setItem('sv_rec',JSON.stringify(pts));}catch(e){}
+  },err=>msg('GPS indisponível: permita a localização no navegador.',5000),
+  {enableHighAccuracy:true,maximumAge:0,timeout:20000});
+  ui();
+}
+function stopRec(){
+  navigator.geolocation.clearWatch(watchId); watchId=null; wake?.release?.(); wake=null;
+  if(pts.length<2){pts=[];msg('Gravação muito curta para gerar o replay.',4000);ui();return;}
+  try{localStorage.removeItem('sv_recname');}catch(e){}
+  const p=pts; setTrack(p,'Gravação de '+new Date(p[0][3]*1000).toLocaleDateString('pt-BR'));
+}
+
+/* ---------- exportar vídeo ---------- */
+/* Reescreve o MP4 fragmentado do MediaRecorder como MP4 normal (com duração) */
+function remuxMp4(ab){
+  const u8=new Uint8Array(ab), dv=new DataView(ab);
+  const t4=(o)=>String.fromCharCode(u8[o],u8[o+1],u8[o+2],u8[o+3]);
+  const rd=(s,e)=>{const a=[];for(let o=s;o+8<=e;){let sz=dv.getUint32(o),ty=t4(o+4),h=8;if(sz===1){sz=Number(dv.getBigUint64(o+8));h=16;}else if(sz===0)sz=e-o;if(sz<h||o+sz>e)break;a.push({ty,s:o,e:o+sz,b:o+h});o+=sz;}return a;};
+  const top=rd(0,u8.length), ftyp=top.find(x=>x.ty==='ftyp'), moov=top.find(x=>x.ty==='moov');
+  if(!moov) throw new Error('sem moov');
+  const find=(p,ty)=>rd(p.b,p.e).find(x=>x.ty===ty), v1=b=>u8[b.b]===1, cp=(b)=>u8.slice(b.s,b.e);
+  const mvhd=find(moov,'mvhd'), mvTs=dv.getUint32(mvhd.b+(v1(mvhd)?20:12));
+  const trex={}, mvex=find(moov,'mvex');
+  if(mvex) rd(mvex.b,mvex.e).filter(x=>x.ty==='trex').forEach(t=>{trex[dv.getUint32(t.b+4)]={d:dv.getUint32(t.b+12),s:dv.getUint32(t.b+16),f:dv.getUint32(t.b+20)};});
+  const trks=rd(moov.b,moov.e).filter(x=>x.ty==='trak').map(trak=>{
+    const tkhd=find(trak,'tkhd'), mdia=find(trak,'mdia'), mdhd=find(mdia,'mdhd'), minf=find(mdia,'minf'), stbl=find(minf,'stbl');
+    return {trak,tkhd,mdia,mdhd,minf,stbl,id:dv.getUint32(tkhd.b+(v1(tkhd)?20:12)),ts:dv.getUint32(mdhd.b+(v1(mdhd)?20:12)),S:[]};
+  });
+  const byId={}; trks.forEach(t=>byId[t.id]=t);
+  // amostras de cada trilha, lidas dos fragmentos (moof)
+  for(const moof of top.filter(x=>x.ty==='moof')){
+    for(const traf of rd(moof.b,moof.e).filter(x=>x.ty==='traf')){
+      const tfhd=find(traf,'tfhd'), T=byId[dv.getUint32(tfhd.b+4)]; if(!T) continue;
+      const tf=dv.getUint32(tfhd.b)&0xffffff, x0=trex[T.id]||{d:0,s:0,f:0}; let o=tfhd.b+8;
+      let base=moof.s; if(tf&1){base=Number(dv.getBigUint64(o));o+=8;}
+      if(tf&2)o+=4; let dd=x0.d,ds=x0.s,dfl=x0.f;
+      if(tf&8){dd=dv.getUint32(o);o+=4;} if(tf&0x10){ds=dv.getUint32(o);o+=4;} if(tf&0x20){dfl=dv.getUint32(o);o+=4;}
+      for(const trun of rd(traf.b,traf.e).filter(x=>x.ty==='trun')){
+        const fl=dv.getUint32(trun.b)&0xffffff, n=dv.getUint32(trun.b+4); let p=trun.b+8, off=base;
+        if(fl&1){off=base+dv.getInt32(p);p+=4;}
+        let ffl=null; if(fl&4){ffl=dv.getUint32(p);p+=4;}
+        for(let k=0;k<n;k++){
+          let d=dd,sz=ds,f=dfl;
+          if(fl&0x100){d=dv.getUint32(p);p+=4;} if(fl&0x200){sz=dv.getUint32(p);p+=4;}
+          if(fl&0x400){f=dv.getUint32(p);p+=4;} else if(k===0&&ffl!==null) f=ffl;
+          if(fl&0x800)p+=4;
+          T.S.push({off,sz,d,sync:!(f&0x10000)}); off+=sz;
+        }
+      }
+    }
+  }
+  const act=trks.filter(t=>t.S.length); if(!act.length) throw new Error('sem amostras');
+  act.forEach(t=>{t.total=t.S.reduce((a,s)=>a+s.d,0); t.bytes=t.S.reduce((a,s)=>a+s.sz,0);});
+  const movDur=Math.round(Math.max(...act.map(t=>t.total*mvTs/t.ts)));
+  const w32=(n)=>[(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255];
+  const str=(s)=>[...s].map(c=>c.charCodeAt(0));
+  const box=(ty,...parts)=>{const body=[].concat(...parts.map(p=>Array.from(p)));return Uint8Array.from([...w32(body.length+8),...str(ty),...body]);};
+  const full=(ty,fl,...parts)=>box(ty,[0,(fl>>16)&255,(fl>>8)&255,fl&255],...parts);
+  const dur=(b,ty,val)=>{ // cópia da caixa com a duração ajustada
+    const c=cp(b), v=new DataView(c.buffer), ver=c[8];
+    if(ty==='mvhd'){ if(ver===1)v.setBigUint64(32,BigInt(val)); else v.setUint32(24,val);}
+    else if(ty==='tkhd'){ if(ver===1)v.setBigUint64(36,BigInt(val)); else v.setUint32(28,val);}
+    else if(ty==='mdhd'){ if(ver===1)v.setBigUint64(32,BigInt(val)); else v.setUint32(24,val);}
+    return c;
+  };
+  const trakOf=(t,off)=>{
+    const runs=[];for(const s of t.S){const r=runs[runs.length-1];if(r&&r.d===s.d)r.c++;else runs.push({c:1,d:s.d});}
+    const stts=full('stts',0,w32(runs.length),...runs.map(r=>[...w32(r.c),...w32(r.d)]));
+    const stsc=full('stsc',0,w32(1),w32(1),w32(t.S.length),w32(1));
+    const stsz=full('stsz',0,w32(0),w32(t.S.length),...t.S.map(s=>w32(s.sz)));
+    const sync=[];t.S.forEach((s,i)=>{if(s.sync)sync.push(i+1);});
+    const stss=sync.length<t.S.length?[full('stss',0,w32(sync.length),...sync.map(w32))]:[];
+    const stco=full('stco',0,w32(1),w32(off));
+    const stblN=box('stbl',cp(find(t.stbl,'stsd')),stts,...stss,stsc,stsz,stco);
+    const minfN=box('minf',...rd(t.minf.b,t.minf.e).filter(x=>x.ty!=='stbl').map(cp),stblN);
+    const mdiaN=box('mdia',...rd(t.mdia.b,t.mdia.e).map(x=>x.ty==='minf'?minfN:x.ty==='mdhd'?dur(x,'mdhd',t.total):cp(x)));
+    return box('trak',...rd(t.trak.b,t.trak.e).map(x=>x.ty==='mdia'?mdiaN:x.ty==='tkhd'?dur(x,'tkhd',Math.round(t.total*mvTs/t.ts)):cp(x)));
+  };
+  const moovOf=(offs)=>box('moov',...rd(moov.b,moov.e).filter(x=>x.ty!=='mvex'&&!(x.ty==='trak'&&!act.some(t=>t.trak.s===x.s))).map(x=>{
+    if(x.ty==='mvhd') return dur(x,'mvhd',movDur);
+    if(x.ty==='trak'){const i=act.findIndex(t=>t.trak.s===x.s);return trakOf(act[i],offs[i]);}
+    return cp(x);}));
+  const ftypB=ftyp?cp(ftyp):box('ftyp',str('isom'),[0,0,2,0],str('isomiso2avc1mp41'));
+  const dataSize=act.reduce((a,t)=>a+t.bytes,0);
+  let moovB=moovOf(act.map(()=>0)), acc=ftypB.length+moovB.length+8;
+  const offs=act.map(t=>{const o=acc;acc+=t.bytes;return o;}); moovB=moovOf(offs);
+  const out=new Uint8Array(ftypB.length+moovB.length+8+dataSize);
+  out.set(ftypB,0); out.set(moovB,ftypB.length);
+  let p=ftypB.length+moovB.length; new DataView(out.buffer).setUint32(p,dataSize+8); out.set(str('mdat'),p+4); p+=8;
+  for(const t of act) for(const s of t.S){out.set(u8.subarray(s.off,s.off+s.sz),p);p+=s.sz;}
+  return out;
+}
+
+let lastVideo=null;
+function painelVideo(){
+  const p=$('#panel'), can=!!(navigator.canShare&&lastVideo&&navigator.canShare({files:[lastVideo.file]}));
+  p.innerHTML='<h3>Vídeo pronto</h3><p>Formato vertical 9:16, próprio para celular.</p>'
+    +(can?'<button class="p" data-sh>Compartilhar (WhatsApp)</button>':'')
+    +'<button data-dl'+(can?'':' class="p"')+'>Baixar vídeo</button><button data-c>Fechar</button>';
+  p.style.display='flex';
+}
+const VW=1080, VH=1920; // vídeo vertical 9:16 (tela de celular)
+function boxExp(on){ // coloca o mapa num quadro 9:16 centralizado durante a gravação
+  const els=[$('#map'),$('#hud')];
+  if(on){
+    const W=Math.min(innerWidth,innerHeight*9/16), H=W*16/9;
+    document.body.classList.add('exp');
+    els.forEach(e=>{e.style.width=W+'px';e.style.height=H+'px';e.style.left=((innerWidth-W)/2)+'px';e.style.top=((innerHeight-H)/2)+'px';});
+    map.setPixelRatio(Math.min(3,VW/W));
+  } else {
+    document.body.classList.remove('exp');
+    els.forEach(e=>{e.style.width=e.style.height=e.style.left=e.style.top='';});
+    map.setPixelRatio(Math.min(devicePixelRatio||1,2));
+  }
+  map.resize();
+  if(pts.length>1&&!drawing){fit(); map.jumpTo({center:ov.c,zoom:ov.z,pitch:0,bearing:0});}
+}
+function startExp(){
+  if(pts.length<2||typeof MediaRecorder==='undefined') return msg('Este navegador não exporta vídeo.',4000);
+  pause(); heli.init(); boxExp(true); exp={state:'preparing'};
+  setTimeout(beginExp,500); // espera o mapa redesenhar no tamanho 9:16
+}
+function beginExp(){
+  const c=document.createElement('canvas'); c.width=VW; c.height=VH;
+  ex={c,x:c.getContext('2d')};
+  const mt=['video/mp4;codecs=avc1,mp4a.40.2','video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4','video/mp4;codecs=avc1','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'].find(t=>MediaRecorder.isTypeSupported(t));
+  const vs=c.captureStream(30), as=heli.stream();
+  const comSom=as&&(/mp4a|opus/.test(mt)||mt==='video/mp4'||mt==='video/webm');
+  const mr=new MediaRecorder(comSom?new MediaStream([...vs.getVideoTracks(),...as.getAudioTracks()]):vs,{mimeType:mt,videoBitsPerSecond:8e6,audioBitsPerSecond:128e3}), ch=[];
+  mr.ondataavailable=e=>e.data.size&&ch.push(e.data);
+  mr.onstop=async()=>{
+    let blob=new Blob(ch,{type:mt});
+    if(mt.includes('mp4')){ try{ blob=new Blob([remuxMp4(await blob.arrayBuffer())],{type:'video/mp4'}); }catch(e){} } // corrige a duração do arquivo
+    const ext=mt.includes('mp4')?'mp4':'webm', fn='sobrevoo-'+(name.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^\w]+/g,'-').replace(/^-|-$/g,'').toLowerCase()||'video')+'.'+ext;
+    lastVideo={blob,fn,file:new File([blob],fn,{type:'video/'+ext})};
+    exp=null; ex=null; boxExp(false); ui(); msg(''); painelVideo();
+  };
+  exp=mr; mr.start(500); prog=0; play(); msg('Gravando o vídeo… aguarde o fim do replay.');
+}
+function stopExp(){ if(exp&&exp.state&&exp.state!=='inactive'&&exp.stop) exp.stop(); }
+
+/* ---------- interface ---------- */
+function msg(t,ms){const e=$('#msg'); e.textContent=t; if(ms) setTimeout(()=>{if(e.textContent===t)e.textContent='';},ms);}
+function ui(){
+  const rec=watchId!=null, has=pts.length>1&&!rec;
+  $('#bRec').textContent=rec?'Parar gravação':'Gravar GPS';
+  $('#bRec').className=rec?'r':'';
+  $('#bRec').disabled=!!exp;
+  $('#bPlay').textContent=playing?'Pausar':'Replay';
+  $('#bPlay').disabled=!has||!!exp;
+  $('#bExp').disabled=!has||!!exp;
+  $('#file').disabled=rec||!!exp;
+  $('#bDraw').disabled=$('#bRoad').disabled=rec||!!exp;
+  $('#bMode').disabled=!has||multi||!!exp; $('#bMode').textContent='Voo: '+(voo==='seguir'?'Seguir trajeto':'Órbita');
+  $('#bAreas').disabled=rec||!!exp;
+  $('#bRen').disabled=!pts.length||rec||!!exp||playing;
+  $('#bLoc').disabled=$('#bLoc2').disabled=rec||!!exp;
+}
+$('#bRec').onclick=()=>watchId!=null?stopRec():startRec();
+$('#bPlay').onclick=()=>playing?pause():play();
+$('#bExp').onclick=startExp;
+
+/* ---------- ir para a minha localização ---------- */
+let locMk=null;
+function minhaLoc(){
+  if(!navigator.geolocation) return msg('Este aparelho não tem GPS disponível.',4000);
+  if(playing||exp||watchId!=null) return;
+  msg('Procurando sua localização…');
+  navigator.geolocation.getCurrentPosition(pos=>{
+    const p=[pos.coords.longitude,pos.coords.latitude];
+    if(!locMk){
+      const e=document.createElement('div');
+      e.style.cssText='width:18px;height:18px;border-radius:50%;background:#2f80ff;border:3px solid #fff;box-shadow:0 0 0 8px rgba(47,128,255,.28)';
+      locMk=new maplibregl.Marker({element:e});
+    }
+    locMk.setLngLat(p).addTo(map);
+    map.easeTo({center:p,zoom:17,pitch:0,bearing:0,duration:900});
+    msg('Você está aqui (precisão de ±'+Math.round(pos.coords.accuracy)+' m)',5000);
+  },err=>msg(err.code===1?'Permita o acesso à localização neste navegador.':'Não consegui obter sua localização.',5000),
+  {enableHighAccuracy:true,timeout:15000,maximumAge:5000});
+}
+$('#bLoc').onclick=$('#bLoc2').onclick=minhaLoc;
+
+/* ---------- desenhar área tocando no mapa + áreas salvas ---------- */
+let drawing=false, draft=[], taps=[], draftSeg=[], drawLine=false, trip=null, snap=true, snapBusy=false;
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const areas=()=>{try{return JSON.parse(localStorage.getItem('sv_areas')||'[]');}catch(e){return [];}};
+function saveAreas(l){try{localStorage.setItem('sv_areas',JSON.stringify(l.slice(0,50)));return true;}catch(e){msg('Não consegui salvar neste navegador.',4000);return false;}}
+function drawDraft(){
+  const n=draft.length, S=(id,d)=>map.getSource(id).setData(d), ring=draft.concat([draft[0]]);
+  S('trk',EMPTY); S('dot',taps.length?{type:'Feature',geometry:{type:'MultiPoint',coordinates:taps}}:EMPTY);
+  S('ghost',n>1?{type:'Feature',geometry:{type:'LineString',coordinates:n>2&&!drawLine?ring:draft}}:EMPTY);
+  S('area',n>2&&!drawLine?{type:'Feature',geometry:{type:'Polygon',coordinates:[ring]}}:EMPTY);
+  hud(at(0),0);
+}
+function startDraw(line){
+  playing=false; outroStart=0; showEnd=false; drawing=true; draft=[]; taps=[]; draftSeg=[]; snapBusy=false; drawLine=line===true; trip=null; $('#bSnap').style.display=drawLine?'':'none'; $('#bSnap').textContent='Seguir estrada: '+(snap?'Sim':'Não'); $('#bTrip').textContent='Percorrer trajeto'; $('#bTrip').style.display=drawLine?'':'none';
+  document.body.classList.add('draw'); map.easeTo({pitch:0,bearing:0,duration:600});
+  drawDraft(); hud(at(0),0); msg(drawLine?'Toque no começo e no fim da estrada: o app liga os dois pela rota. Ou use Percorrer trajeto (GPS).':'Toque no mapa para marcar os pontos da área.'); ui();
+}
+function exitDraw(){if(trip) navigator.geolocation.clearWatch(trip.id); trip=null; $('#bTrip').textContent='Percorrer trajeto'; drawing=false; draft=[]; taps=[]; draftSeg=[]; snapBusy=false; document.body.classList.remove('draw'); msg(''); ui();}
+function cancelDraw(){exitDraw(); if(pts.length>1) setTrack(pts,name,null,multi?fields:null,forcedOpen); else drawDraft();}
+function doneDraw(){
+  const line=drawLine;
+  if(draft.length<(line?2:3)) return msg(line?'Marque pelo menos 2 pontos.':'Marque pelo menos 3 pontos.',3000);
+  const n=(prompt(line?'Nome da estrada:':'Nome da área:',(line?'Estrada ':'Área ')+new Date().toLocaleDateString('pt-BR'))||'').trim();
+  if(!n) return;
+  const ring=line?draft.slice():draft.concat([draft[0]]), l=areas(); l.unshift({n,r:ring,t:Date.now(),k:line?'l':'a'}); saveAreas(l);
+  exitDraw(); setTrack(ring.map(q=>[q[0],q[1],0,null]),n,Date.now()/1000,null,line);
+}
+function listAreas(){
+  const l=areas(), p=$('#panel');
+  p.innerHTML='<h3>Áreas salvas</h3>'+(l.length?'':'<p>Nenhuma área salva ainda.</p>')
+    +l.map((a,i)=>`<div class="it"><button data-o="${i}">${esc(a.n)}${a.k==='l'?' · estrada':''}</button><button data-rn="${i}">Renomear</button><button data-k="${i}">KML</button><button data-x="${i}">Excluir</button></div>`).join('')
+    +'<button data-c>Fechar</button>';
+  p.style.display='flex';
+}
+let cityRes=[];
+function buscaCidade(){
+  if(playing||exp||watchId!=null){ msg('Pare o replay ou a gravação antes de buscar',2500); return; }
+  const p=$('#panel');
+  p.innerHTML='<h3>Buscar cidade</h3><input id="cq" type="search" placeholder="Digite a cidade (ex.: Bacabal MA)" autocomplete="off"><button data-go>Buscar</button><div id="cres" style="display:flex;flex-direction:column;gap:6px"></div><button data-c>Fechar</button>';
+  p.style.display='flex';
+  const q=$('#cq'); q.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); q.blur(); cidadeGo(); } };
+  setTimeout(()=>q.focus(),50);
+}
+async function cidadeGo(){
+  const q=($('#cq').value||'').trim(), r=$('#cres'); if(!q) return;
+  r.innerHTML='<p>Buscando…</p>';
+  try{
+    const u='https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&accept-language=pt-BR&q='+encodeURIComponent(q);
+    const j=await (await fetch(u)).json(); cityRes=j;
+    r.innerHTML=j.length?j.map((c,i)=>`<button data-cy="${i}" style="justify-content:flex-start;text-align:left;padding:8px 12px">${esc(c.display_name)}</button>`).join(''):'<p>Nenhum resultado. Tente outro nome.</p>';
+  }catch(e){ r.innerHTML='<p>Sem internet ou busca indisponível. Tente de novo.</p>'; }
+}
+function baixarKml(a){
+  const c=a.r.map(q=>q[0]+','+q[1]+',0').join(' ');
+  const s=`<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Placemark><name>${esc(a.n)}</name>${a.k==='l'?`<LineString><tessellate>1</tessellate><coordinates>${c}</coordinates></LineString>`:`<Polygon><outerBoundaryIs><LinearRing><coordinates>${c}</coordinates></LinearRing></outerBoundaryIs></Polygon>`}</Placemark></kml>`;
+  const l=document.createElement('a'); l.href=URL.createObjectURL(new Blob([s],{type:'application/vnd.google-earth.kml+xml'}));
+  l.download=a.n.replace(/[^\w\-]+/g,'_')+'.kml'; l.click();
+}
+$('#panel').onclick=e=>{
+  const d=e.target.dataset, l=areas(); if(!d) return;
+  if('c' in d) $('#panel').style.display='none';
+  else if('go' in d) cidadeGo();
+  else if(d.cy!=null){
+    const c=cityRes[d.cy]; $('#panel').style.display='none'; if(!c) return;
+    const b=c.boundingbox&&c.boundingbox.map(Number);
+    if(b) map.fitBounds([[b[2],b[0]],[b[3],b[1]]],{padding:30,maxZoom:15,pitch:0,bearing:0,duration:1500});
+    else map.easeTo({center:[+c.lon,+c.lat],zoom:12,pitch:0,bearing:0,duration:1500});
+    msg(c.display_name.split(',')[0],2500);
+  }
+  else if('sh' in d){ if(lastVideo) navigator.share({files:[lastVideo.file],title:name}).catch(()=>{}); }
+  else if('dl' in d){ if(lastVideo){const a=document.createElement('a'); a.href=URL.createObjectURL(lastVideo.blob); a.download=lastVideo.fn; a.click();} }
+  else if(d.o!=null){const a=l[d.o]; $('#panel').style.display='none'; setTrack(a.r.map(q=>[q[0],q[1],0,null]),a.n,a.t/1000,null,a.k==='l');}
+  else if(d.rn!=null){
+    const a=l[d.rn], n=(prompt('Novo nome:',a.n)||'').trim().slice(0,60);
+    if(n&&n!==a.n){ if(pts.length&&a.n===name){name=n; info=buildInfo(); if(lastH) hud(lastH[0],lastH[1]);} a.n=n; saveAreas(l); }
+    listAreas();
+  }
+  else if(d.k!=null) baixarKml(l[d.k]);
+  else if(d.x!=null){l.splice(d.x,1); saveAreas(l); listAreas();}
+};
+map.on('click',async e=>{
+  if(!drawing||trip||snapBusy) return;
+  const q=[e.lngLat.lng,e.lngLat.lat], l=draft[draft.length-1];
+  if(drawLine&&snap&&l){
+    snapBusy=true; msg('Buscando a estrada…');
+    try{
+      const ac=new AbortController(), to=setTimeout(()=>ac.abort(),15000);
+      const r=await fetch('https://router.project-osrm.org/route/v1/driving/'+l[0]+','+l[1]+';'+q[0]+','+q[1]+'?overview=full&geometries=geojson',{signal:ac.signal});
+      clearTimeout(to);
+      const j=await r.json(), g=j.routes&&j.routes[0]&&j.routes[0].geometry.coordinates;
+      if(!g||g.length<2) throw new Error('sem rota');
+      if(!drawing||trip){snapBusy=false;return;}
+      const add=g.slice(1).map(c=>[c[0],c[1]]); add.forEach(c=>draft.push(c)); draftSeg.push(add.length); taps.push(add[add.length-1]); msg('');
+    }catch(err){
+      if(!drawing||trip){snapBusy=false;return;}
+      draft.push(q); draftSeg.push(1); taps.push(q); msg('Não achei a estrada (sem internet?). Liguei em linha reta.',4500);
+    }
+    snapBusy=false; drawDraft(); return;
+  }
+  draft.push(q); draftSeg.push(1); taps.push(q); msg(''); drawDraft();
+});
+$('#bDraw').onclick=()=>startDraw(false); $('#bRoad').onclick=()=>startDraw(true); $('#bAreas').onclick=listAreas;
+$('#bRen').onclick=()=>{ // renomeia o projeto aberto (e a área salva com esse nome, se houver)
+  if(!pts.length||exp||playing) return;
+  const old=name, n=(prompt('Nome do projeto:',old)||'').trim().slice(0,60);
+  if(!n||n===old) return;
+  name=n; info=buildInfo();
+  const l=areas(), a=l.find(x=>x.n===old);
+  if(a){a.n=n; saveAreas(l);}
+  else if(old==='Última gravação'||old.startsWith('Gravação de')){try{localStorage.setItem('sv_recname',n);}catch(e){}}
+  if(lastH) hud(lastH[0],lastH[1]); else hud(at(1),0);
+  msg('Projeto renomeado.',2500);
+};
+$('#bCity').onclick=buscaCidade;
+$('#bAlt').textContent='Altura do voo: '+HT[hi].n;
+$('#bAlt').onclick=()=>{ hi=(hi+1)%HT.length; try{localStorage.setItem('voo_altura',hi);}catch(e){}
+  $('#bAlt').textContent='Altura do voo: '+HT[hi].n; msg('Altura do voo: '+HT[hi].n,2000); if(!playing&&!exp&&pts.length>1&&prog>0&&prog<1) frame(prog); };
+$('#bMode').onclick=()=>{ if(playing||exp||multi||pts.length<2) return; setVoo(voo==='seguir'?'orbita':'seguir'); ui(); msg('Voo: '+(voo==='seguir'?'seguir trajeto':'órbita'),2500); };
+$('#bUndo').onclick=()=>{if(trip||snapBusy) return; const k=draftSeg.pop()||1; draft.length=Math.max(0,draft.length-k); taps.pop(); drawDraft();};
+$('#bSnap').onclick=()=>{ snap=!snap; $('#bSnap').textContent='Seguir estrada: '+(snap?'Sim':'Não'); msg(snap?'Os pontos serão ligados pela estrada (precisa de internet).':'Os pontos serão ligados em linha reta.',3000); };
+function tripStart(){ // grava a estrada com o GPS: sai da sua localização e vai marcando o caminho
+  if(trip) return tripClose();
+  if(!navigator.geolocation) return msg('Este aparelho não tem GPS disponível.',4000);
+  if(draft.length&&!confirm('Apagar os pontos marcados e gravar o trajeto pelo GPS?')) return;
+  draft=[]; taps=[]; draftSeg=[]; drawDraft(); msg('Procurando sinal de GPS…');
+  trip={p:null,h:null,id:null,first:true}; $('#bTrip').textContent='Fechar trajeto';
+  try{navigator.wakeLock?.request('screen').then(w=>{if(trip) trip.w=w; else w.release();}).catch(()=>{});}catch(e){}
+  trip.id=navigator.geolocation.watchPosition(pos=>{
+    if(!trip) return;
+    const c=pos.coords; if(c.accuracy>35) return;
+    const p=[c.longitude,c.latitude], l=draft[draft.length-1];
+    trip.p=p; trip.h=c.heading;
+    if(!l||hav(l,p)>=3) draft.push(p);
+    msg('');
+    if(trip.first){trip.first=false; map.easeTo({center:p,zoom:17,pitch:0,bearing:0,duration:700});}
+    else map.easeTo({center:p,duration:700});
+    drawDraft();
+  },err=>msg('GPS indisponível: permita a localização no navegador.',5000),
+  {enableHighAccuracy:true,maximumAge:0,timeout:20000});
+}
+function tripClose(){ // chegou onde queria: para de gravar e salva a estrada
+  if(!trip) return;
+  navigator.geolocation.clearWatch(trip.id); try{trip.w&&trip.w.release();}catch(e){}
+  trip=null; $('#bTrip').textContent='Percorrer trajeto'; drawDraft();
+  if(draft.length<2) return msg('Poucos pontos gravados. Ande mais um pouco e tente de novo.',4000);
+  doneDraw();
+}
+$('#bTrip').onclick=tripStart;
+$('#bCancel').onclick=cancelDraw; $('#bDone').onclick=doneDraw;
+
+map.on('move',()=>{ if(lastH&&!playing&&!outroStart) hud(lastH[0],lastH[1]); });
+map.on('load',()=>{
+  ['area','ghost','casing','line','dot'].forEach(id=>map.setLayoutProperty(id,'visibility','none'));
+  try{
+    const s=JSON.parse(localStorage.getItem('sv_rec')||'[]');
+    if(s.length>1) setTrack(s,localStorage.getItem('sv_recname')||'Última gravação'); else msg('Grave um percurso ou abra um arquivo GPX, KML ou KMZ.');
+  }catch(e){msg('Grave um percurso ou abra um arquivo GPX, KML ou KMZ.');}
+  ui();
+});
+
+if('serviceWorker' in navigator && /^https?:/.test(location.protocol)) window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+</script>
+</body>
+</html>
